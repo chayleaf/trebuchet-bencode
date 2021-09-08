@@ -19,16 +19,19 @@ use std::{
     str,
 };
 
-/// A trait to be implemented by any type that can be encoded and decoded using Bencoding
+/// A trait to be implemented by every type that can be encoded and decoded using
+/// [Bencode](https://en.wikipedia.org/wiki/Bencode).
 pub trait Bencodable<'a>: Sized + 'a {
-    /// The error type returned by the bdecode function.
+    /// The error type used by the [bdecode](Bencodable::bdecode) parser.
     ///
-    /// Use `nom::error::Error<&'a [u8]>;` as the default (default associated types aren't supported yet).
+    /// Use `nom::error::Error<&'a [u8]>` as the default (default associated types aren't supported yet).
+    ///
+    /// See also: [nom::Err].
     type Error: ParseError<&'a [u8]>;
     /// Deserialize from bencoded data.
     ///
     /// # Errors
-    /// An error is returned if the data format is invalid.
+    /// An error is returned if the data couldn't be parsed.
     ///
     /// # Example
     /// ```
@@ -53,6 +56,7 @@ pub trait Bencodable<'a>: Sized + 'a {
     /// ```
     /// # use trebuchet_bencode::Bencodable;
     /// let mut serialized = Vec::<u8>::new();
+    /// // Vec<u8> implements std::io::Write
     /// 1337.bencode(&mut serialized)?;
     /// assert_eq!(&serialized, b"i1337e");
     /// # Ok::<(), std::io::Error>(())
@@ -168,7 +172,7 @@ macro_rules! impl_hashmap {
 
 impl_hashmap!(HashMap<Vec<u8>, T> HashMap<&'a [u8], T>);
 
-/// An enum representing any bencoded datatype with a lifetime
+/// An enum representing any bencoded datatype with a lifetime.
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub enum BencodeAny<'a> {
     /// An integer.
@@ -181,7 +185,7 @@ pub enum BencodeAny<'a> {
     Str(&'a [u8]),
 }
 
-/// An enum representing any bencoded datatype (owned)
+/// An enum representing any bencoded datatype (owned).
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub enum BencodeAnyOwned {
     /// An integer.
@@ -254,7 +258,7 @@ mod tests {
     use super::*;
     use std::fmt::Debug;
 
-    /// Strip lifetime from a u8 slice
+    /// Strip lifetime from a u8 slice.
     fn s(x: &[u8]) -> &[u8] {
         x
     }
