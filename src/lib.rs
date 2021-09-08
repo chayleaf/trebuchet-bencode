@@ -1,3 +1,4 @@
+#![warn(clippy::pedantic)]
 /// A crate for [Bencoding](https://en.wikipedia.org/wiki/Bencode)
 use itertools::Itertools;
 pub use nom;
@@ -25,6 +26,10 @@ pub trait Bencodable<'a>: Sized + 'a {
     type Error: ParseError<&'a [u8]>;
     /// Deserialize from bencoded data.
     ///
+    /// # Errors
+    /// An error is returned if the data format is invalid.
+    ///
+    /// # Example
     /// ```
     /// # use trebuchet_bencode::Bencodable;
     /// let input = b"i5ei6enon-bencoded data";
@@ -38,7 +43,18 @@ pub trait Bencodable<'a>: Sized + 'a {
     /// # Ok::<(), nom::Err<<i32 as Bencodable>::Error>>(())
     /// ```
     fn bdecode(input: &'a [u8]) -> IResult<&'a [u8], Self, Self::Error>;
-    /// Serialize into bencoding.
+    /// Serialize into a stream using bencoding.
+    ///
+    /// # Errors
+    /// An error is returned if the stream can't be written to due to an I/O error.
+    ///
+    /// # Example
+    /// ```
+    /// # use trebuchet_bencode::Bencodable;
+    /// let mut serialized = Vec::<u8>::new();
+    /// 1337.bencode(&mut serialized)?;
+    /// # Ok::<(), std::io::Error>(())
+    /// ```
     fn bencode<W: Write>(&self, stream: &mut W) -> io::Result<()>;
 }
 
@@ -132,8 +148,7 @@ macro_rules! impl_hashmap {
                             ),
                         );
                         let ret = it.map(|(k, v)| (k.into(), v)).collect::<Self>();
-                        let (input, _) = it.finish()?;
-                        Ok((input, ret))
+                        Ok((it.finish()?.0, ret))
                     },
                     tag(b"e"),
                 )(input)
@@ -192,6 +207,7 @@ impl<'a> From<BencodeAny<'a>> for BencodeAnyOwned {
 
 impl<'a> BencodeAny<'a> {
     /// Creates an owned object from a borrowed object.
+    #[allow(clippy::must_use_candidate)]
     pub fn into_owned(&self) -> BencodeAnyOwned {
         From::from(self)
     }
@@ -282,7 +298,12 @@ mod tests {
     #[test]
     fn list_values() {
         // Be careful not to use Vec<u8>, as that's the string type!
-        verify1(b"li1ei2ei3eee", &vec![1, 2, 3], Some(b"li1ei2ei3ee"), Some(b"e"));
+        verify1(
+            b"li1ei2ei3eee",
+            &vec![1, 2, 3],
+            Some(b"li1ei2ei3ee"),
+            Some(b"e"),
+        );
         verify1(
             b"l4:spam4:eggsi5eei5e",
             &vec![
