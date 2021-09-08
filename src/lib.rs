@@ -1,5 +1,6 @@
 #![warn(clippy::pedantic)]
-/// A crate for [Bencoding](https://en.wikipedia.org/wiki/Bencode)
+//! A crate for encoding and decoding data using [Bencode](https://en.wikipedia.org/wiki/Bencode) -
+//! an encoding format most commonly used for torrent files.
 use itertools::Itertools;
 pub use nom;
 use nom::{
@@ -21,8 +22,8 @@ use std::{
 /// A trait to be implemented by any type that can be encoded and decoded using Bencoding
 pub trait Bencodable<'a>: Sized + 'a {
     /// The error type returned by the bdecode function.
-    /// Use `type Error = nom::error::Error<&'a [u8]>;` as the default (default associated types
-    /// aren't supported yet).
+    ///
+    /// Use `nom::error::Error<&'a [u8]>;` as the default (default associated types aren't supported yet).
     type Error: ParseError<&'a [u8]>;
     /// Deserialize from bencoded data.
     ///
@@ -53,6 +54,7 @@ pub trait Bencodable<'a>: Sized + 'a {
     /// # use trebuchet_bencode::Bencodable;
     /// let mut serialized = Vec::<u8>::new();
     /// 1337.bencode(&mut serialized)?;
+    /// assert_eq!(&serialized, b"i1337e");
     /// # Ok::<(), std::io::Error>(())
     /// ```
     fn bencode<W: Write>(&self, stream: &mut W) -> io::Result<()>;
@@ -169,18 +171,26 @@ impl_hashmap!(HashMap<Vec<u8>, T> HashMap<&'a [u8], T>);
 /// An enum representing any bencoded datatype with a lifetime
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub enum BencodeAny<'a> {
+    /// An integer.
     Int(i64),
+    /// A list.
     List(Vec<BencodeAny<'a>>),
+    /// A key:value dictionary.
     Dict(HashMap<&'a [u8], BencodeAny<'a>>),
+    /// A string (encoding isn't specified, it might even be raw binary data).
     Str(&'a [u8]),
 }
 
 /// An enum representing any bencoded datatype (owned)
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub enum BencodeAnyOwned {
+    /// An integer.
     Int(i64),
+    /// A list.
     List(Vec<BencodeAnyOwned>),
+    /// A key:value dictionary.
     Dict(HashMap<Vec<u8>, BencodeAnyOwned>),
+    /// A string (encoding isn't specified, it might even be raw binary data).
     Str(Vec<u8>),
 }
 
@@ -244,6 +254,7 @@ mod tests {
     use super::*;
     use std::fmt::Debug;
 
+    /// Strip lifetime from a u8 slice
     fn s(x: &[u8]) -> &[u8] {
         x
     }
