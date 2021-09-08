@@ -181,7 +181,10 @@ pub enum BencodeAny<'a> {
     List(Vec<BencodeAny<'a>>),
     /// A key:value dictionary.
     Dict(HashMap<&'a [u8], BencodeAny<'a>>),
-    /// A string (encoding isn't specified, it might even be raw binary data).
+    /// A byte string. Might specify a text value, however it isn't guaranteed to be UTF-8. For
+    /// torrents, encoding is sometimes specified in the `encoding` field of the metainfo
+    /// dictionary (i.e. the top-level dictionary of the torrent file). Many torrent clients don't
+    /// specify the encoding and silently use UTF-8, so that can be considered the default.
     Str(&'a [u8]),
 }
 
@@ -194,7 +197,10 @@ pub enum BencodeAnyOwned {
     List(Vec<BencodeAnyOwned>),
     /// A key:value dictionary.
     Dict(HashMap<Vec<u8>, BencodeAnyOwned>),
-    /// A string (encoding isn't specified, it might even be raw binary data).
+    /// A byte string. Might specify a text value, however it isn't guaranteed to be UTF-8. For
+    /// torrents, encoding is sometimes specified in the `encoding` field of the metainfo
+    /// dictionary (i.e. the top-level dictionary of the torrent file). Many torrent clients don't
+    /// specify the encoding and silently use UTF-8, so that can be considered the default.
     Str(Vec<u8>),
 }
 
