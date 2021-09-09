@@ -1,6 +1,12 @@
 #![warn(clippy::pedantic)]
+#![cfg_attr(not(feature = "std"), no_std)]
 //! A crate for encoding and decoding data using [Bencode](https://en.wikipedia.org/wiki/Bencode) -
 //! an encoding format most commonly used for torrent files.
+#[cfg(not(feature = "std"))]
+extern crate alloc;
+#[cfg(all(feature = "serde", not(feature = "std")))]
+use alloc::format;
+use core::{convert::TryFrom, num::TryFromIntError, str};
 use itertools::Itertools;
 pub use nom;
 use nom::{
@@ -8,16 +14,57 @@ use nom::{
     bytes::complete::{tag, take, take_while1},
     combinator::{iterator, map, map_res, opt, recognize},
     error::ParseError,
-    multi::many0,
     sequence::{delimited, pair, preceded},
-    IResult,
+    AsBytes, IResult,
 };
 use num_traits::{Num, PrimInt};
+#[cfg(feature = "std")]
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap, LinkedList, VecDeque},
     io::{self, Write},
-    str,
 };
+#[cfg(not(feature = "std"))]
+use {
+    alloc::{
+        collections::{BTreeMap, LinkedList, VecDeque},
+        string::{String, ToString},
+        vec::Vec,
+    },
+    hashbrown::HashMap,
+};
+#[cfg(feature = "serde")]
+use {
+    core::{fmt, marker::PhantomData},
+    serde1::{
+        de::{self, MapAccess, Visitor},
+        ser::SerializeMap,
+        Deserialize, Serialize, Serializer,
+    },
+};
+
+#[cfg(not(feature = "std"))]
+pub mod io {
+    pub enum Error {}
+    pub type Result<T> = core::result::Result<T, Error>;
+
+    pub trait Write {
+        /// This is no-std emulation of [`std::io::Write::write_all`].
+        ///
+        /// # Errors
+        /// Not supported yet, actually
+        fn write_all(&mut self, buf: &[u8]) -> Result<()>;
+    }
+
+    impl Write for alloc::vec::Vec<u8> {
+        fn write_all(&mut self, buf: &[u8]) -> Result<()> {
+            self.extend_from_slice(buf);
+            Ok(())
+        }
+    }
+}
+
+#[cfg(not(feature = "std"))]
+pub use io::Write;
 
 /// A trait to be implemented by every type that can be encoded and decoded using
 /// [Bencode](https://en.wikipedia.org/wiki/Bencode).
@@ -26,7 +73,7 @@ pub trait Bencodable<'a>: Sized + 'a {
     ///
     /// Use `nom::error::Error<&'a [u8]>` as the default (default associated types aren't supported yet).
     ///
-    /// See also: [nom::Err].
+    /// See also: [`nom::Err`].
     type Error: ParseError<&'a [u8]>;
     /// Deserialize from bencoded data.
     ///
@@ -123,17 +170,87 @@ impl<'a> Bencodable<'a> for Vec<u8> {
     }
 }
 
-impl<'a, T: Bencodable<'a>> Bencodable<'a> for Vec<T> {
-    type Error = T::Error;
-    fn bdecode(input: &'a [u8]) -> IResult<&'a [u8], Self, Self::Error> {
-        delimited(tag(b"l"), many0(T::bdecode), tag(b"e"))(input)
+impl<'a> Bencodable<'a> for &'a str {
+    type Error = nom::error::Error<&'a [u8]>;
+    fn bdecode(input: &'a [u8]) -> IResult<&'a [u8], Self> {
+        let (input, len) = decimal::<usize>(input)?;
+        preceded(tag(b":"), map_res(take(len), str::from_utf8))(input)
     }
     fn bencode<W: Write>(&self, stream: &mut W) -> io::Result<()> {
-        stream.write_all(b"l")?;
-        self.iter().try_for_each(|x| x.bencode(stream))?;
-        stream.write_all(b"e")
+        self.as_bytes().bencode(stream)
     }
 }
+
+impl<'a> Bencodable<'a> for String {
+    type Error = nom::error::Error<&'a [u8]>;
+    fn bdecode(input: &'a [u8]) -> IResult<&'a [u8], Self> {
+        map(map_res(<&'a [u8]>::bdecode, str::from_utf8), From::from)(input)
+    }
+    fn bencode<W: Write>(&self, stream: &mut W) -> io::Result<()> {
+        self.as_str().bencode(stream)
+    }
+}
+
+/// Vec doesn't have `push_back` implemented, so implement it ourselves so we can
+/// use the default From implementation.
+trait VecFromHelper<T> {
+    fn push_back(&mut self, x: T);
+}
+
+impl<T> VecFromHelper<T> for Vec<T> {
+    fn push_back(&mut self, x: T) {
+        self.push(x);
+    }
+}
+
+macro_rules! impl_vec {
+    ($($ty:ty)*) => {$(
+        impl<'a, T: Bencodable<'a>> Bencodable<'a> for $ty {
+            type Error = T::Error;
+            fn bdecode(input: &'a [u8]) -> IResult<&'a [u8], Self, Self::Error> {
+                delimited(
+                    tag(b"l"),
+                    |input| {
+                        let mut it = iterator(
+                            input,
+                            T::bdecode,
+                        );
+                        let ret = it.collect::<Self>();
+                        Ok((it.finish()?.0, ret))
+                    },
+                    tag(b"e"),
+                )(input)
+            }
+            fn bencode<W: Write>(&self, stream: &mut W) -> io::Result<()> {
+                stream.write_all(b"l")?;
+                self.iter().try_for_each(|x| x.bencode(stream))?;
+                stream.write_all(b"e")
+            }
+        }
+
+        impl<'a, T: Into<BencodeAny<'a>>> From<$ty> for BencodeAny<'a> {
+            fn from(x: $ty) -> Self {
+                let mut ret = Vec::new();
+                for v in x {
+                    ret.push_back(v.into());
+                }
+                Self::List(ret)
+            }
+        }
+
+        impl<T: Into<BencodeAnyOwned>> From<$ty> for BencodeAnyOwned {
+            fn from(x: $ty) -> Self {
+                let mut ret = Vec::new();
+                for v in x {
+                    ret.push_back(v.into());
+                }
+                Self::List(ret)
+            }
+        }
+    )*};
+}
+
+impl_vec!(Vec<T> VecDeque<T> LinkedList<T>);
 
 macro_rules! impl_hashmap {
     ($($ty:ty)*) => {$(
@@ -170,7 +287,32 @@ macro_rules! impl_hashmap {
     )*};
 }
 
-impl_hashmap!(HashMap<Vec<u8>, T> HashMap<&'a [u8], T>);
+macro_rules! impl_from_hashmap {
+    ($($ty:ident)*) => {$(
+        impl<'a, T> From<$ty<&'a [u8], T>> for BencodeAny<'a> where BencodeAny<'a>: From<T> {
+            fn from(x: $ty<&'a [u8], T>) -> Self {
+                let mut ret = HashMap::<&'a [u8], BencodeAny<'a>>::new();
+                for (k, v) in x {
+                    ret.insert(k, v.into());
+                }
+                BencodeAny::Dict(ret)
+            }
+        }
+
+        impl<K: AsRef<[u8]>, T: Into<BencodeAnyOwned>> From<$ty<K, T>> for BencodeAnyOwned {
+            fn from(x: $ty<K, T>) -> Self {
+                let mut ret = HashMap::<Vec<u8>, BencodeAnyOwned>::new();
+                for (k, v) in x {
+                    ret.insert(k.as_ref().into(), v.into());
+                }
+                BencodeAnyOwned::Dict(ret)
+            }
+        }
+    )*};
+}
+
+impl_hashmap!(HashMap<Vec<u8>, T> HashMap<&'a [u8], T> BTreeMap<Vec<u8>, T> BTreeMap<&'a [u8], T>);
+impl_from_hashmap!(HashMap BTreeMap);
 
 /// An enum representing any bencoded datatype with a lifetime.
 #[derive(Debug, PartialEq, Eq, Clone)]
@@ -211,7 +353,7 @@ impl<'a> From<&'a BencodeAny<'a>> for BencodeAnyOwned {
             BencodeAny::List(v) => Self::List(v.iter().map(From::from).collect()),
             BencodeAny::Dict(d) => Self::Dict(
                 d.iter()
-                    .map(|(&k, v)| (k.to_owned(), From::from(v)))
+                    .map(|(&k, v)| (Vec::from(k), From::from(v)))
                     .collect(),
             ),
             BencodeAny::Str(s) => Self::Str(s.to_vec()),
@@ -230,6 +372,188 @@ impl<'a> BencodeAny<'a> {
     #[allow(clippy::must_use_candidate)]
     pub fn into_owned(&self) -> BencodeAnyOwned {
         From::from(self)
+    }
+}
+
+#[cfg(feature = "serde")]
+mod serde {
+    use super::{
+        de, fmt, str, BencodeAny, BencodeAnyOwned, Deserialize, HashMap, MapAccess, PhantomData,
+        TryFrom, Visitor,
+    };
+    #[cfg(not(feature = "std"))]
+    use super::{format, String, Vec};
+    #[derive(Default)]
+    struct BencodeAnyVisitor<'a> {
+        _ph: PhantomData<&'a u8>,
+    }
+
+    #[derive(Default)]
+    struct BencodeAnyOwnedVisitor;
+
+    macro_rules! default_visitor_impl {
+        () => {
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("a bencoded value")
+            }
+            fn visit_map<M>(self, mut access: M) -> Result<Self::Value, M::Error>
+            where
+                M: MapAccess<'de>,
+            {
+                let mut ret: HashMap<_, Self::Value> =
+                    HashMap::with_capacity(access.size_hint().unwrap_or(0));
+                while let Some((k, v)) = access.next_entry::<&'de [u8], _>()? {
+                    ret.insert(k, v);
+                }
+                Ok(ret.into())
+            }
+            fn visit_seq<A>(self, mut access: A) -> Result<Self::Value, A::Error>
+            where
+                A: de::SeqAccess<'de>,
+            {
+                let mut ret: Vec<Self::Value> = Vec::with_capacity(access.size_hint().unwrap_or(0));
+                while let Some(v) = access.next_element()? {
+                    ret.push(v);
+                }
+                Ok(ret.into())
+            }
+            fn visit_newtype_struct<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+            where
+                D: serde1::Deserializer<'de>,
+            {
+                deserializer.deserialize_any(Self::default())
+            }
+            fn visit_i128<E>(self, value: i128) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                TryFrom::try_from(value).map_err(|_| {
+                    E::custom(format!("bencode integer can't fit into i64: {}", value))
+                })
+            }
+            fn visit_u128<E>(self, value: u128) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                TryFrom::try_from(value).map_err(|_| {
+                    E::custom(format!("bencode integer can't fit into i64: {}", value))
+                })
+            }
+            fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                TryFrom::try_from(value).map_err(|_| {
+                    E::custom(format!("bencode integer can't fit into i64: {}", value))
+                })
+            }
+            fn visit_u32<E>(self, value: u32) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                Ok(From::from(value))
+            }
+            fn visit_u16<E>(self, value: u16) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                Ok(From::from(value))
+            }
+            fn visit_u8<E>(self, value: u8) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                Ok(From::from(value as u16))
+            }
+            fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                Ok(From::from(value))
+            }
+            fn visit_i32<E>(self, value: i32) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                Ok(From::from(value))
+            }
+            fn visit_i16<E>(self, value: i16) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                Ok(From::from(value))
+            }
+            fn visit_i8<E>(self, value: i8) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                Ok(From::from(value))
+            }
+        };
+    }
+
+    impl<'a, 'de: 'a> Visitor<'de> for BencodeAnyVisitor<'a> {
+        type Value = BencodeAny<'a>;
+        default_visitor_impl!();
+        fn visit_borrowed_str<E>(self, v: &'de str) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            Ok(From::from(v))
+        }
+        fn visit_borrowed_bytes<E>(self, v: &'de [u8]) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            Ok(From::from(v))
+        }
+    }
+
+    impl<'de> Visitor<'de> for BencodeAnyOwnedVisitor {
+        type Value = BencodeAnyOwned;
+        default_visitor_impl!();
+        fn visit_bytes<E>(self, v: &[u8]) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            Ok(From::from(v))
+        }
+        fn visit_byte_buf<E>(self, v: Vec<u8>) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            Ok(From::from(v))
+        }
+        fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            Ok(From::from(v))
+        }
+        fn visit_string<E>(self, v: String) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            Ok(From::from(v))
+        }
+    }
+
+    impl<'a, 'de: 'a> Deserialize<'de> for BencodeAny<'a> {
+        fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+        where
+            D: serde1::Deserializer<'de>,
+        {
+            deserializer.deserialize_any(BencodeAnyVisitor::<'a>::default())
+        }
+    }
+
+    impl<'de> Deserialize<'de> for BencodeAnyOwned {
+        fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+        where
+            D: serde1::Deserializer<'de>,
+        {
+            deserializer.deserialize_any(BencodeAnyOwnedVisitor::default())
+        }
     }
 }
 
@@ -254,10 +578,63 @@ macro_rules! impl_any {
                 }
             }
         }
+
+        impl<'a> From<i64> for $ty { fn from(n: i64) -> Self { Self::Int(n.into()) } }
+        impl<'a> From<i32> for $ty { fn from(n: i32) -> Self { Self::Int(n.into()) } }
+        impl<'a> From<i16> for $ty { fn from(n: i16) -> Self { Self::Int(n.into()) } }
+        impl<'a> From<i8> for $ty { fn from(n: i8) -> Self { Self::Int(n.into()) } }
+        impl<'a> From<u32> for $ty { fn from(n: u32) -> Self { Self::Int(n.into()) } }
+        impl<'a> From<u16> for $ty { fn from(n: u16) -> Self { Self::Int(n.into()) } }
+        impl<'a> TryFrom<u128> for $ty {
+            type Error = TryFromIntError;
+            fn try_from(n: u128) -> Result<Self, TryFromIntError> { TryFrom::try_from(n).map(Self::Int) }
+        }
+        impl<'a> TryFrom<u64> for $ty {
+            type Error = TryFromIntError;
+            fn try_from(n: u64) -> Result<Self, TryFromIntError> { TryFrom::try_from(n).map(Self::Int) }
+        }
+        impl<'a> TryFrom<i128> for $ty {
+            type Error = TryFromIntError;
+            fn try_from(n: i128) -> Result<Self, TryFromIntError> { TryFrom::try_from(n).map(Self::Int) }
+
+        }
+        impl<'a> From<&'a str> for $ty { fn from(s: &'a str) -> Self { Self::Str(s.as_bytes().into()) } }
+        impl<'a> From<&'a [u8]> for $ty { fn from(s: &'a [u8]) -> Self { Self::Str(s.into()) } }
+
+        #[cfg(feature = "serde")]
+        impl<'a> Serialize for $ty {
+            fn serialize<S>(&self, ser: S) -> Result<S::Ok, S::Error>
+                where S: Serializer {
+                match self {
+                    Self::Int(x) => x.serialize(ser),
+                    Self::List(x) => x.serialize(ser),
+                    Self::Dict(x) => {
+                        let mut map = ser.serialize_map(Some(x.len()))?;
+                        for (k, v) in x {
+                            map.serialize_entry(k as &[u8], v)?;
+                        }
+                        map.end()
+                    },
+                    Self::Str(x) => x.serialize(ser),
+                }
+            }
+        }
     )*};
 }
 
 impl_any!(BencodeAny<'a> BencodeAnyOwned);
+
+impl From<String> for BencodeAnyOwned {
+    fn from(x: String) -> Self {
+        Self::Str(x.into())
+    }
+}
+
+impl From<Vec<u8>> for BencodeAnyOwned {
+    fn from(x: Vec<u8>) -> Self {
+        Self::Str(x)
+    }
+}
 
 #[cfg(test)]
 mod tests {

@@ -6,7 +6,16 @@ edition = "2018"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-sha-1 = "0.9"
-nom = { version = "7.0", features = ["alloc"] }
+nom = { default-features = false, version = "7.0" }
 num-traits = "0.2"
-itertools = "0.10"
+itertools = { default-features = false, version = "0.10", features = ["use_alloc"] }
+serde1 = { package = "serde", version = "1.0", default-features = false, optional = true, features = ["alloc"] }
+no-std-compat = { optional = true, version = "0.4", features = ["alloc"] }
+hashbrown = { optional = true, version = "0.11" }
+
+[features]
+serde = ["serde1"]
+std = ["serde1/std", "nom/std"]
+nostd = ["no-std-compat", "hashbrown"]
+default = ["std"]
+
